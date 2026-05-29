@@ -16,7 +16,11 @@ load_env()
 
 app = FastAPI(title="AI Interview Simulator API", version="1.0.0")
 
-origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://ai-interview-simulator-puce.vercel.app",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in origins if o.strip()],
