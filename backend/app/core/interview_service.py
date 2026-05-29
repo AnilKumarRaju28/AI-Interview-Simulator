@@ -2,15 +2,23 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from langfuse import Langfuse, propagate_attributes
+from langfuse import propagate_attributes
 
 from app.core.evaluator import evaluate_answer
 from app.core.groq_client import make_groq_client
-from app.core.interview import FinalReport, generate_final_report, generate_question
+from app.core.interview import (
+    FinalReport,
+    generate_final_report,
+    generate_question,
+)
 from app.core.langfuse_utils import make_langfuse, new_session_id
 from app.core.memory import InterviewState, QAItem
 from app.core.timer_config import get_timer_config
-from app.store.session_store import ActiveInterview, new_interview_id, store
+from app.store.session_store import (
+    ActiveInterview,
+    new_interview_id,
+    store,
+)
 
 
 def evaluation_to_dict(ev: Any) -> dict[str, Any]:
@@ -55,25 +63,30 @@ def start_interview(
     candidate_name: str,
     session_id: Optional[str] = None,
 ) -> dict[str, Any]:
+
     langfuse = make_langfuse()
     llm_client, groq_cfg = make_groq_client()
+
     sid = session_id or new_session_id()
+
     trace_id = langfuse.create_trace_id(seed=sid)
     trace_context = {"trace_id": trace_id}
 
     name = candidate_name.strip()
+
     if not name:
         raise ValueError("Candidate name cannot be empty")
 
     state = InterviewState(
         session_id=sid,
         role=role,
-        difficulty=difficulty,  # type: ignore[arg-type]
+        difficulty=difficulty,
         n_questions=n_questions,
         candidate_name=name,
     )
 
     with propagate_attributes(session_id=sid):
+
         with langfuse.start_as_current_observation(
             trace_context=trace_context,
             as_type="span",
@@ -84,9 +97,9 @@ def start_interview(
                 "n_questions": n_questions,
                 "session_id": sid,
                 "candidate_name": name,
-                "tags": ["web", "ai-interview", role, difficulty],
             },
         ):
+
             question, _ = generate_question(
                 langfuse=langfuse,
                 llm_client=llm_client,
@@ -97,6 +110,7 @@ def start_interview(
             )
 
     interview_id = new_interview_id()
+
     active = ActiveInterview(
         interview_id=interview_id,
         trace_id=trace_id,
@@ -107,6 +121,8 @@ def start_interview(
         current_question=question,
         current_question_number=1,
     )
+
+    # SAVE SESSION
     store.create(active)
 
     try:
@@ -115,6 +131,7 @@ def start_interview(
         pass
 
     timer = get_timer_config(difficulty, n_questions)
+
     return {
         "interview_id": interview_id,
         "session_id": sid,
@@ -131,35 +148,27 @@ def start_interview(
 
 
 def submit_answer(*, interview_id: str, answer: str) -> dict[str, Any]:
+
+    # LOAD SESSION
     active = store.get(interview_id)
+
     if not active:
         raise KeyError("Interview not found")
+
     if active.status == "completed":
         raise ValueError("Interview already completed")
 
     answer = answer.strip()
+
     if not answer:
         raise ValueError("Answer cannot be empty")
 
     i = active.current_question_number
     q = active.current_question
+
     trace_context = {"trace_id": active.trace_id}
 
     with propagate_attributes(session_id=active.state.session_id):
-        with active.langfuse.start_as_current_observation(
-            trace_context=trace_context,
-            as_type="span",
-            name="accept_user_answer",
-            input={"question_number": i, "question": q},
-            output={"answer": answer},
-            metadata={
-                "role": active.state.role,
-                "difficulty": active.state.difficulty,
-                "session_id": active.state.session_id,
-                "question_number": i,
-            },
-        ):
-            pass
 
         ev, ev_meta = evaluate_answer(
             langfuse=active.langfuse,
@@ -172,17 +181,6 @@ def submit_answer(*, interview_id: str, answer: str) -> dict[str, Any]:
             trace_context=trace_context,
         )
 
-        try:
-            active.langfuse.create_score(
-                name="answer_score",
-                value=ev.score,
-                trace_id=active.trace_id,
-                data_type="NUMERIC",
-                comment=f"Question {i} score",
-            )
-        except Exception:
-            pass
-
         active.state.add_item(
             QAItem(
                 question_number=i,
@@ -194,6 +192,7 @@ def submit_answer(*, interview_id: str, answer: str) -> dict[str, Any]:
         )
 
         if i >= active.state.n_questions:
+
             report = generate_final_report(
                 langfuse=active.langfuse,
                 llm_client=active.llm_client,
@@ -202,15 +201,23 @@ def submit_answer(*, interview_id: str, answer: str) -> dict[str, Any]:
                 trace_id=active.trace_id,
                 trace_context=trace_context,
             )
+
             active.final_report = report
             active.status = "completed"
+
+            # UPDATE STORE
+            store.create(active)
+
             result = {
                 "completed": True,
                 "question_number": i,
                 "total_questions": active.state.n_questions,
             }
+
         else:
+
             next_num = i + 1
+
             next_q, _ = generate_question(
                 langfuse=active.langfuse,
                 llm_client=active.llm_client,
@@ -219,8 +226,13 @@ def submit_answer(*, interview_id: str, answer: str) -> dict[str, Any]:
                 question_number=next_num,
                 trace_context=trace_context,
             )
+
             active.current_question = next_q
             active.current_question_number = next_num
+
+            # UPDATE STORE
+            store.create(active)
+
             result = {
                 "completed": False,
                 "question_number": next_num,
@@ -237,18 +249,28 @@ def submit_answer(*, interview_id: str, answer: str) -> dict[str, Any]:
 
 
 def get_report(*, interview_id: str) -> dict[str, Any]:
+
     active = store.get(interview_id)
+
     if not active:
         raise KeyError("Interview not found")
-    if active.status != "completed" or not active.final_report:
+
+    if active.status != "completed":
         raise ValueError("Interview not completed yet")
 
+    if not active.final_report:
+        raise ValueError("Final report missing")
+
     report = active.final_report
+
     return {
         "session_id": active.state.session_id,
         "candidate_name": active.state.candidate_name,
         "role": active.state.role,
         "difficulty": active.state.difficulty,
-        "per_question_feedback": [qa_item_to_dict(item) for item in active.state.items],
+        "per_question_feedback": [
+            qa_item_to_dict(item)
+            for item in active.state.items
+        ],
         "final_report": final_report_to_dict(report),
     }
